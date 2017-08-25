@@ -116,5 +116,69 @@ namespace Challenges
             ReactiveAssert.AreElementsEqual(new[] { 10, 11 }, results[2]);
             ReactiveAssert.AreElementsEqual(new[] { 12, 13, 14 }, results[3]);
         }
+
+        [Test]
+        public void AvoidOverlappingStreams_ByUsingSwitchOperator()
+        {
+            /******************************************************
+            *
+            * you start with Stream that create sub stream of string,
+            * each sub stream is built of single char representation.
+            *
+            * --#----------------@----------------*------------------
+            *
+            *    |
+            *
+            *     #--##--###--####--#####--######--#######--########
+            *
+            *                    |
+            *
+            *                    @--@@--@@@--@@@@--@@@@--@@@@@--@@@@@@
+            *
+            *                                     |
+            *
+            *                                     *---**---***---****
+            *
+            * you should find a way to get output stream where
+            * listen to the latest sub stream.
+            *
+            * the output stream should be look like:
+            *
+            * --#--##--###--####-@--@@--@@@--@@@@-*---**---***---****
+            *
+            * in other words you have to avoid overlapping char.
+            *
+            ******************************************************/
+
+            var scheduler = new TestScheduler();
+            var observer = scheduler.CreateObserver<string>();
+
+            var source = new Subject<char>();
+            var overlapped = from c in source
+                // create stream per char
+                select Observable.Interval(TimeSpan.FromMilliseconds(1), scheduler).
+                    Select(l => new string(c, (int)l + 1)); // multiply the char
+
+            //Solution: use switch instead of Merge
+            var flatten = overlapped.Switch();
+            flatten.Subscribe(observer);
+
+            source.OnNext('#');
+            scheduler.AdvanceBy(TimeSpan.FromMilliseconds(3).Ticks);
+            source.OnNext('@');
+            scheduler.AdvanceBy(TimeSpan.FromMilliseconds(3).Ticks);
+            source.OnNext('*');
+            scheduler.AdvanceBy(TimeSpan.FromMilliseconds(3).Ticks);
+
+            var results = observer.
+                Messages
+                .Where(m => m.Value.Kind == NotificationKind.OnNext)
+                .Select(m => m.Value.Value).ToArray();
+
+            ReactiveAssert.AreElementsEqual(
+                new[] { "#", "##", "###", "@", "@@", "@@@", "*", "**", "***" },
+                results);
+
+        }
     }
 }
