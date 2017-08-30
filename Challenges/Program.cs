@@ -10,9 +10,18 @@ using System.Threading;
 
 namespace Challenges
 {
-    class Program { static void Main() { } }
+    public class Program
+    {
+        static void Main()
+        {
+            //Playground.FilterMerge();
+            Playground.SuspendResumeTrial();
 
-    class RxChallengesTests
+            Console.ReadKey();
+        }
+    }
+
+    public class RxChallengesTests
     {
         [Test]
         public void Buffer_ShouldBulkOn_CountTimeoutOrFlush_NaiveSolution()
@@ -179,6 +188,76 @@ namespace Challenges
                 new[] { "#", "##", "###", "@", "@@", "@@@", "*", "**", "***" },
                 results);
 
+        }
+
+        [Test]
+        public void SuspendResume_2_Test()
+        {
+            /**********************************************************************
+                *
+                * source -1---------2---------3-4-5-6-7--------8---------9------
+                * Result -1---------2---------3-4------------------------9------
+                *
+                **********************************************************************/
+
+            int suspendOnCount = 3;
+            TimeSpan suspendCountDuration = TimeSpan.FromSeconds(5);
+            TimeSpan suspendDuration = TimeSpan.FromSeconds(15);
+
+            // arrange
+            var scheduler = new TestScheduler();
+            var observer = scheduler.CreateObserver<int>();
+
+            var source = new Subject<int>();
+
+            // act
+            var windowIdx = 0;
+            var result = source.Window(source, i => Observable.Timer(suspendCountDuration)).Subscribe(
+                w =>
+                {
+                    var thisWindowIdx = windowIdx++;
+                    Console.WriteLine("--Starting new window");
+                    var windowName = "Window" + thisWindowIdx;
+                    w.Subscribe(i => Console.WriteLine($"{i} is in window {windowName}"));
+                });
+
+
+            /**********************************************************************
+                *
+                * source --1---------2----------3-4-5-6-7--------8---------9------
+                *
+                **********************************************************************/
+
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(2).Ticks);
+            source.OnNext(1);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(10).Ticks);
+            source.OnNext(2);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(11).Ticks);
+            source.OnNext(3);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(2).Ticks);
+            source.OnNext(4);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(2).Ticks);
+            source.OnNext(5);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(2).Ticks);
+            source.OnNext(6);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(2).Ticks);
+            source.OnNext(7);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(9).Ticks);
+            source.OnNext(8);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(10).Ticks);
+            source.OnNext(9);
+
+            // verify
+            var results = observer.
+                Messages
+                .Where(m => m.Value.Kind == NotificationKind.OnNext)
+                .Select(m => m.Value.Value).ToArray();
+
+            Assert.AreEqual(1, results[0]);
+            Assert.AreEqual(2, results[1]);
+            Assert.AreEqual(3, results[2]);
+            Assert.AreEqual(4, results[3]);
+            Assert.AreEqual(9, results[4]);
         }
     }
 }

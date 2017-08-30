@@ -79,6 +79,10 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="CTFBuffer.cs" />
+    <Compile Include="Emit.cs" />
+    <Compile Include="Playground\EnumerableToObservable.cs" />
+    <Compile Include="Playground\StockPriceVariation.cs" />
+    <Compile Include="Playground\Playground.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
