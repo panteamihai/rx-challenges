@@ -7,59 +7,9 @@ using System.Reactive.Subjects;
 
 namespace Challenges
 {
-    public static class TimePrinterExtensions
-    {
-        public static string ToSeconds(this DateTimeOffset offset)
-        {
-            return offset.DateTime.ToString("ss.fff") + " sec(s)";
-        }
-    }
-
     class Playground
     {
-        internal class ValueDescriptor<T>
-        {
-            public T Value { get; }
-            public Emit Emit { get; }
-            public NotificationKind Kind { get; }
-            public DateTimeOffset Timestamp { get; }
-            public string Window { get; }
-
-            public ValueDescriptor()
-            {
-                Value = default(T);
-                Emit = Emit.None;
-                Kind = NotificationKind.OnNext;
-                Timestamp = DateTimeOffset.MinValue;
-                Window = null;
-            }
-
-            public ValueDescriptor(T value, Emit emit, NotificationKind kind, DateTimeOffset timestamp, string window)
-            {
-                Value = value;
-                Emit = emit;
-                Kind = kind;
-                Timestamp = timestamp;
-                Window = window;
-            }
-
-            public override string ToString()
-            {
-                return Kind == NotificationKind.OnNext
-                    ? $"{Value} appeared after {Timestamp.ToSeconds()} as {Emit} through {Kind} in {Window}"
-                    : $"{Kind} in {Window} after {Timestamp.ToSeconds()}";
-            }
-
-            public string ToShortString()
-            {
-                var s = "after " + Timestamp.DateTime.ToString("ss.fff") + " sec(s)";
-                return Kind == NotificationKind.OnNext
-                    ? $"{Value} emitted @ {s} as {Emit} by an {Kind} in {Window}"
-                    : $"{Kind} in {Window} @ {s}";
-            }
-        }
-
-        public static void SuspendResumeTrial()
+        public static void SuspendResumeTrialFinal()
         {
             var scheduler = new TestScheduler();
 
@@ -68,112 +18,59 @@ namespace Challenges
             TimeSpan suspendDuration = TimeSpan.FromSeconds(15);
 
             var subject = new Subject<int>();
-            var source = subject.ObserveOn(scheduler);
+            var source = subject.Timestamp(scheduler).Select(i => new MetaValue<int>(i.Value, i.Timestamp, Emit.Value));
 
-            var heartbeatCount = 0;
-            var closer = Observable.Interval(suspendCountDuration, scheduler);
-            closer.Subscribe(_ => { ++heartbeatCount; Console.WriteLine($"[CLOSER] Tick #{heartbeatCount}");});
+            var head = source.Take(2);
+            var tail = source
+                        .Buffer(3, 1)
+                        .Where(b => b.Count == 3)
+                        .Select(b =>
+                        {
+                            var lastInBuffer = b.Last();
+                            var firstInBuffer = b.First();
 
-            var windowIndex = 0;
-            var refinedOverlappingWindows = source
-                                            .Window(source, _ => closer)
-                                            .Select(window =>
-                                                    {
-                                                        var localWindowIndex = windowIndex++;
-                                                        var windowName = $"[Window{localWindowIndex}]";
-                                                        var refinedWindowName = $"[RefinedWindow{localWindowIndex}]";
+                            var diff = lastInBuffer.Timestamp.Subtract(firstInBuffer.Timestamp);
+                            return new MetaValue<int>(lastInBuffer.Value, lastInBuffer.Timestamp, diff <= suspendCountDuration ? Emit.Suspend : Emit.Value);
+                        });
 
-                                                        var windowOpening = true;
-                                                        window.Subscribe(i =>
-                                                            {
-                                                                if (windowOpening)
-                                                                {
-                                                                    Console.WriteLine($"{windowName} Opened @ {scheduler.Now.ToSeconds()}");
-                                                                    windowOpening = false;
-                                                                }
+            var rectified = tail.Scan(
+                ScannedValueWithRectification<int>.Empty,
+                (enrichedAccumulatedValue, currentMetaValue) =>
+                {
+                    if (enrichedAccumulatedValue.StartOfSuspendWindow != DateTimeOffset.MinValue)
+                    {
+                        var endOfSuspend = enrichedAccumulatedValue.StartOfSuspendWindow.Add(suspendDuration);
+                        if (currentMetaValue.Timestamp < endOfSuspend)
+                            return new ScannedValueWithRectification<int>(
+                                null,
+                                enrichedAccumulatedValue.StartOfSuspendWindow,
+                                enrichedAccumulatedValue.RemainingNumberOfValuesToRectify);
+                    }
 
-                                                                Console.WriteLine($"{windowName} Got {i} @ {scheduler.Now.ToSeconds()}");
-                                                            }, () => Console.WriteLine($"{windowName} Closed @ {scheduler.Now.ToSeconds()}"));
+                    if (enrichedAccumulatedValue.RemainingNumberOfValuesToRectify > 0)
+                    {
+                        // Rectify the first N-1 values after a resume to Emit.Value
+                        var rectifiedCurrent = new MetaValue<int>(currentMetaValue.Value, currentMetaValue.Timestamp, Emit.Value);
+                        // Preserve the information of the suspend window until all necessary values have been rectified
+                        return new ScannedValueWithRectification<int>(
+                            rectifiedCurrent,
+                            enrichedAccumulatedValue.StartOfSuspendWindow,
+                            enrichedAccumulatedValue.RemainingNumberOfValuesToRectify - 1);
+                    }
 
-                                                        // We decorate the element/value with a flag which characterizes what its existence represents for this particular
-                                                        // 5 second window. If it is the 3rd to be blipped, then it will actually end the window since, as the problem states,
-                                                        // it should now suspend the original observable's emitting.
-                                                        var valueEmittingObservable = window.Take(2).Select(i => new Tuple<int, Emit>(i, Emit.Value));
-                                                        var delayEmittingObservable = window.Skip(2).Take(1).Select(i => new Tuple<int, Emit>(i, Emit.Delay));
+                    return currentMetaValue.Kind == Emit.Suspend
+                        ? new ScannedValueWithRectification<int>(null, currentMetaValue.Timestamp, 2)
+                        : new ScannedValueWithRectification<int>(currentMetaValue, DateTimeOffset.MinValue, 0);
 
-                                                        // We'll refine the windows in the sense that we'll turn them into either windows of 5 seconds or 3 elements
-                                                        // The (Take + Merge) combo ensures that if the initial 5 second window has more than 3 elements, it will be closed
-                                                        var refinedWindows = valueEmittingObservable.Merge(delayEmittingObservable);
+                    //Emit value
+                })
+                .Where(ev => ev.MetaValue != null)
+                .Select(ev => ev.MetaValue);
 
-                                                        var refinedWindowOpening = true;
-                                                        refinedWindows.Subscribe(
-                                                            i =>
-                                                            {
-                                                                if (refinedWindowOpening)
-                                                                {
-                                                                    Console.WriteLine($"{refinedWindowName} Opened @ {scheduler.Now.ToSeconds()}");
-                                                                    refinedWindowOpening = false;
-                                                                }
-                                                                Console.WriteLine($"{refinedWindowName} Got {i} @ {scheduler.Now.ToSeconds()}");
-                                                            }, () => Console.WriteLine($"{refinedWindowName} Closed @ {scheduler.Now.ToSeconds()}"));
+            var prefinal = head.Merge(rectified);
+            prefinal.Subscribe(Console.WriteLine);
 
-                                                        // We materialize the window because we'll next flatten the resulting windows, and their overlaps will contain
-                                                        // what the value/element represents in all the windows it participates in. A value/element is emitted as a fixed point
-                                                        // on the axis, so we'll need that information too, that's why we do a Timestamp transformation.
-                                                        // We'll only be concerned with OnNext events, not the OnCompleted events of windows, but since they do occur, we'll have
-                                                        // to add some dummy values to them (null pattern-ish)
-                                                        return refinedWindows
-                                                                .Materialize()
-                                                                .Where(i => i.Kind == NotificationKind.OnNext)
-                                                                .Dematerialize()
-                                                                .Timestamp(scheduler);
-                                                    })
-                                            .Merge();
-
-            var refinedWindowGroups = refinedOverlappingWindows.GroupBy(i => i.Timestamp);
-
-            var groupIndex = 0;
-            var flattenedRefinement = refinedWindowGroups.SelectMany(group =>
-                                            {
-                                                var localGroupIndex = groupIndex++;
-                                                var groupName = $"[Group{localGroupIndex}]";
-                                                var timeboundGroupName = $"[TimeboundGroup{localGroupIndex}]";
-
-                                                var groupOpening = true;
-                                                group.Subscribe(
-                                                    i =>
-                                                    {
-                                                        if (groupOpening)
-                                                        {
-                                                            Console.WriteLine($"{groupName} Opened @ {scheduler.Now.ToSeconds()}");
-                                                            groupOpening = false;
-                                                        }
-                                                        Console.WriteLine($"{groupName} Got {i.Value} @ {scheduler.Now.ToSeconds()}");
-                                                    }, () => Console.WriteLine($"{groupName} Closed @ {scheduler.Now.ToSeconds()}"));
-
-                                                var timeboundGroup = group.TakeUntil(Observable.Timer(TimeSpan.FromTicks(1), scheduler));
-                                                // All the values in the group should "materialize" instantly since the group is over a point in time (timestamp).
-                                                // The group needs to be closed manually because it wont complete on its own.
-                                                // Why? Because the point in time (timestamp) might only emit one value, or be just an OnCompleted event
-                                                var timeboundGroupOpening = true;
-                                                timeboundGroup.Subscribe(
-                                                    i =>
-                                                    {
-                                                        if (timeboundGroupOpening)
-                                                        {
-                                                            Console.WriteLine($"{timeboundGroupName} Opened @ {scheduler.Now.ToSeconds()}");
-                                                            timeboundGroupOpening = false;
-                                                        }
-                                                        Console.WriteLine($"{timeboundGroupName} Got {i.Value} @ {scheduler.Now.ToSeconds()}");
-                                                    }, exception => Console.WriteLine($"{timeboundGroupName} errored"), () => Console.WriteLine($"{timeboundGroupName} Closed @ {scheduler.Now.ToSeconds()}"));
-
-                                                var aggregatePerPointInTime = timeboundGroup.Aggregate(new Tuple<int, Emit>(int.MinValue, Emit.None), (acc, current) => current.Value.Item2 == Emit.Delay ? current.Value : (acc != null && acc.Item2 == Emit.Delay ? acc : current.Value));
-                                                aggregatePerPointInTime.Subscribe(i => Console.WriteLine($"\t[Aggregate @ Key{{ {group.Key.ToSeconds()} }}] is {i} @ {scheduler.Now.ToSeconds()}"));
-
-                                                return aggregatePerPointInTime;
-                                            });
-
-            flattenedRefinement.Subscribe(r => Console.WriteLine("\t\t[PROCESSED] " + r));
+            var final = prefinal.Select(m => m.Value);
 
             /**********************************************************************
                 *
@@ -199,8 +96,147 @@ namespace Challenges
             subject.OnNext(8);
             scheduler.AdvanceBy(TimeSpan.FromMilliseconds(10000).Ticks);
             subject.OnNext(9);
+            scheduler.AdvanceBy(TimeSpan.FromMilliseconds(22000).Ticks);
+            subject.OnNext(10);
+            scheduler.AdvanceBy(TimeSpan.FromMilliseconds(2000).Ticks);
+            subject.OnNext(11);
+            scheduler.AdvanceBy(TimeSpan.FromMilliseconds(2000).Ticks);
+            subject.OnNext(12);
+            scheduler.AdvanceBy(TimeSpan.FromMilliseconds(12000).Ticks);
+            subject.OnNext(13);
+            scheduler.AdvanceBy(TimeSpan.FromMilliseconds(1000).Ticks);
+            subject.OnNext(14);
+            scheduler.AdvanceBy(TimeSpan.FromMilliseconds(2000).Ticks);
+            subject.OnNext(15); //should be emitted outside of suspend
+            scheduler.AdvanceBy(TimeSpan.FromMilliseconds(1000).Ticks);
+            subject.OnNext(16);
+            scheduler.AdvanceBy(TimeSpan.FromMilliseconds(2000).Ticks);
+            subject.OnNext(17);
+            scheduler.AdvanceBy(TimeSpan.FromMilliseconds(10000).Ticks);
+            subject.OnNext(18);
             scheduler.AdvanceBy(TimeSpan.FromMilliseconds(1).Ticks);
             subject.OnCompleted();
+        }
+
+        public static void SuspendResumeVersionOne(TimeSpan suspendCountDuration, TestScheduler scheduler, IObservable<int> source)
+        {
+            var heartbeatCount = 0;
+            var closer = Observable.Interval(suspendCountDuration, scheduler);
+            closer.Subscribe(
+                _ =>
+                {
+                    ++heartbeatCount;
+                    Console.WriteLine($"[CLOSER] Tick #{heartbeatCount}");
+                });
+
+            var windowIndex = 0;
+            var refinedOverlappingWindows = source.Window(source, _ => closer).Select(
+                window =>
+                {
+                    var localWindowIndex = windowIndex++;
+                    var windowName = $"[Window{localWindowIndex}]";
+                    var refinedWindowName = $"[RefinedWindow{localWindowIndex}]";
+
+                    var windowOpening = true;
+                    window.Subscribe(
+                        i =>
+                        {
+                            if (windowOpening)
+                            {
+                                Console.WriteLine($"{windowName} Opened @ {scheduler.Now.DateTime.ToString("ss.fff") + " sec(s)"}");
+                                windowOpening = false;
+                            }
+
+                            Console.WriteLine($"{windowName} Got {i} @ {scheduler.Now.DateTime.ToString("ss.fff") + " sec(s)"}");
+                        },
+                        () => Console.WriteLine($"{windowName} Closed @ {scheduler.Now.DateTime.ToString("ss.fff") + " sec(s)"}"));
+
+                    // We decorate the element/value with a flag which characterizes what its existence represents for this particular
+                    // 5 second window. If it is the 3rd to be blipped, then it will actually end the window since, as the problem states,
+                    // it should now suspend the original observable's emitting.
+                    var valueEmittingObservable = window.Take(2).Select(i => new Tuple<int, Emit>(i, Emit.Value));
+                    var delayEmittingObservable = window.Skip(2).Take(1).Select(i => new Tuple<int, Emit>(i, Emit.Suspend));
+
+                    // We'll refine the windows in the sense that we'll turn them into either windows of 5 seconds or 3 elements
+                    // The (Take + Merge) combo ensures that if the initial 5 second window has more than 3 elements, it will be closed
+                    var refinedWindows = valueEmittingObservable.Merge(delayEmittingObservable);
+
+                    var refinedWindowOpening = true;
+                    refinedWindows.Subscribe(
+                        i =>
+                        {
+                            if (refinedWindowOpening)
+                            {
+                                Console.WriteLine($"{refinedWindowName} Opened @ {scheduler.Now.DateTime.ToString("ss.fff") + " sec(s)"}");
+                                refinedWindowOpening = false;
+                            }
+                            Console.WriteLine($"{refinedWindowName} Got {i} @ {scheduler.Now.DateTime.ToString("ss.fff") + " sec(s)"}");
+                        },
+                        () => Console.WriteLine($"{refinedWindowName} Closed @ {scheduler.Now.DateTime.ToString("ss.fff") + " sec(s)"}"));
+
+                    // We materialize the window because we'll next flatten the resulting windows, and their overlaps will contain
+                    // what the value/element represents in all the windows it participates in. A value/element is emitted as a fixed point
+                    // on the axis, so we'll need that information too, that's why we do a Timestamp transformation.
+                    // We'll only be concerned with OnNext events, not the OnCompleted events of windows, but since they do occur, we'll have
+                    // to add some dummy values to them (null pattern-ish)
+                    return refinedWindows.Materialize().Where(i => i.Kind == NotificationKind.OnNext).Dematerialize()
+                        .Timestamp(scheduler);
+                }).Merge();
+
+            var refinedWindowGroups = refinedOverlappingWindows.GroupBy(i => i.Timestamp);
+
+            var groupIndex = 0;
+            var flattenedRefinement = refinedWindowGroups.SelectMany(
+                group =>
+                {
+                    var localGroupIndex = groupIndex++;
+                    var groupName = $"[Group{localGroupIndex}]";
+                    var timeboundGroupName = $"[TimeboundGroup{localGroupIndex}]";
+
+                    var groupOpening = true;
+                    @group.Subscribe(
+                        i =>
+                        {
+                            if (groupOpening)
+                            {
+                                Console.WriteLine($"{groupName} Opened @ {scheduler.Now.DateTime.ToString("ss.fff") + " sec(s)"}");
+                                groupOpening = false;
+                            }
+                            Console.WriteLine($"{groupName} Got {i.Value} @ {scheduler.Now.DateTime.ToString("ss.fff") + " sec(s)"}");
+                        },
+                        () => Console.WriteLine($"{groupName} Closed @ {scheduler.Now.DateTime.ToString("ss.fff") + " sec(s)"}"));
+
+                    var timeboundGroup = @group.TakeUntil(Observable.Timer(TimeSpan.FromTicks(1), scheduler));
+                    // All the values in the group should "materialize" instantly since the group is over a point in time (timestamp).
+                    // The group needs to be closed manually because it wont complete on its own.
+                    // Why? Because the point in time (timestamp) might only emit one value, or be just an OnCompleted event
+                    var timeboundGroupOpening = true;
+                    timeboundGroup.Subscribe(
+                        i =>
+                        {
+                            if (timeboundGroupOpening)
+                            {
+                                Console.WriteLine($"{timeboundGroupName} Opened @ {scheduler.Now.DateTime.ToString("ss.fff") + " sec(s)"}");
+                                timeboundGroupOpening = false;
+                            }
+                            Console.WriteLine($"{timeboundGroupName} Got {i.Value} @ {scheduler.Now.DateTime.ToString("ss.fff") + " sec(s)"}");
+                        },
+                        exception => Console.WriteLine($"{timeboundGroupName} errored"),
+                        () => Console.WriteLine($"{timeboundGroupName} Closed @ {scheduler.Now.DateTime.ToString("ss.fff") + " sec(s)"}"));
+
+                    var aggregatePerPointInTime = timeboundGroup.Aggregate(
+                        new Tuple<int, Emit>(int.MinValue, Emit.None),
+                        (acc, current) => current.Value.Item2 == Emit.Suspend
+                            ? current.Value
+                            : (acc != null && acc.Item2 == Emit.Suspend ? acc : current.Value));
+                    aggregatePerPointInTime.Subscribe(
+                        i => Console.WriteLine(
+                            $"\t[Aggregate @ Key{{ {@group.Key.DateTime.ToString("ss.fff") + " sec(s)"} }}] is {i} @ {scheduler.Now.DateTime.ToString("ss.fff") + " sec(s)"}"));
+
+                    return aggregatePerPointInTime;
+                });
+
+            flattenedRefinement.Subscribe(r => Console.WriteLine("\t\t[PROCESSED] " + r));
         }
 
         public static void MergeVsGroupVsIntersect()

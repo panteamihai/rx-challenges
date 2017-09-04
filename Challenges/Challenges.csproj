@@ -79,10 +79,14 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="CTFBuffer.cs" />
-    <Compile Include="Emit.cs" />
-    <Compile Include="Playground\EnumerableToObservable.cs" />
-    <Compile Include="Playground\StockPriceVariation.cs" />
-    <Compile Include="Playground\Playground.cs" />
+    <Compile Include="mixins\Emit.cs" />
+    <Compile Include="mixins\MetaValue.cs" />
+    <Compile Include="mixins\ObservableMixins.cs" />
+    <Compile Include="mixins\ScannedValue.cs" />
+    <Compile Include="mixins\ScannedValueWithRectification.cs" />
+    <Compile Include="playground\EnumerableToObservable.cs" />
+    <Compile Include="playground\StockPriceVariation.cs" />
+    <Compile Include="playground\Playground.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>

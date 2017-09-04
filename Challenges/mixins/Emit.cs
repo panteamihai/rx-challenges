@@ -4,6 +4,6 @@
     {
         None,
         Value,
-        Delay
+        Suspend
     }
 }

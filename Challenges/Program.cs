@@ -14,9 +14,6 @@ namespace Challenges
     {
         static void Main()
         {
-            //Playground.FilterMerge();
-            Playground.SuspendResumeTrial();
-
             Console.ReadKey();
         }
     }
@@ -191,7 +188,7 @@ namespace Challenges
         }
 
         [Test]
-        public void SuspendResume_2_Test()
+        public void SuspendDuringFlood_ByUsingBufferAndScan()
         {
             /**********************************************************************
                 *
@@ -211,16 +208,8 @@ namespace Challenges
             var source = new Subject<int>();
 
             // act
-            var windowIdx = 0;
-            var result = source.Window(source, i => Observable.Timer(suspendCountDuration)).Subscribe(
-                w =>
-                {
-                    var thisWindowIdx = windowIdx++;
-                    Console.WriteLine("--Starting new window");
-                    var windowName = "Window" + thisWindowIdx;
-                    w.Subscribe(i => Console.WriteLine($"{i} is in window {windowName}"));
-                });
-
+            var floodPresured = source.SuspendDuringFlood(suspendOnCount, suspendCountDuration, suspendDuration, scheduler);
+            floodPresured.Subscribe(observer);
 
             /**********************************************************************
                 *
@@ -246,6 +235,8 @@ namespace Challenges
             source.OnNext(8);
             scheduler.AdvanceBy(TimeSpan.FromSeconds(10).Ticks);
             source.OnNext(9);
+            scheduler.AdvanceBy(1);
+            source.OnCompleted();
 
             // verify
             var results = observer.
@@ -258,6 +249,207 @@ namespace Challenges
             Assert.AreEqual(3, results[2]);
             Assert.AreEqual(4, results[3]);
             Assert.AreEqual(9, results[4]);
+        }
+
+        [Test]
+        public void SuspendDuringFloodWithRectification_ByUsingBufferAndScan()
+        {
+            /**********************************************************************
+                *
+                * source -1---------2---------3-4-5-6-7--------8---------9------
+                * Result -1---------2---------3-4------------------------9------
+                *
+                **********************************************************************/
+
+            int suspendOnCount = 3;
+            TimeSpan suspendCountDuration = TimeSpan.FromSeconds(5);
+            TimeSpan suspendDuration = TimeSpan.FromSeconds(15);
+
+            // arrange
+            var scheduler = new TestScheduler();
+            var observer = scheduler.CreateObserver<int>();
+
+            var source = new Subject<int>();
+
+            // act
+            var floodPresured = source.SuspendDuringFloodWithRectification(suspendOnCount, suspendCountDuration, suspendDuration, scheduler);
+            floodPresured.Subscribe(observer);
+
+            /**********************************************************************
+                *
+                * source --1---------2----------3-4-5-6-7--------8---------9------
+                *
+                **********************************************************************/
+
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(2).Ticks);
+            source.OnNext(1);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(10).Ticks);
+            source.OnNext(2);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(11).Ticks);
+            source.OnNext(3);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(2).Ticks);
+            source.OnNext(4);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(2).Ticks);
+            source.OnNext(5);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(2).Ticks);
+            source.OnNext(6);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(2).Ticks);
+            source.OnNext(7);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(9).Ticks);
+            source.OnNext(8);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(10).Ticks);
+            source.OnNext(9);
+            scheduler.AdvanceBy(1);
+            source.OnCompleted();
+
+            // verify
+            var results = observer.
+                Messages
+                .Where(m => m.Value.Kind == NotificationKind.OnNext)
+                .Select(m => m.Value.Value).ToArray();
+
+            Assert.AreEqual(1, results[0]);
+            Assert.AreEqual(2, results[1]);
+            Assert.AreEqual(3, results[2]);
+            Assert.AreEqual(4, results[3]);
+            Assert.AreEqual(9, results[4]);
+        }
+
+        [Test]
+        public void SuspendDuringFlood_EmphasizeTheOverlappingNatureOfSuspensions()
+        {
+            /******************************************************************************
+             * Max = 3, Window = 5000ms, Suspend = 15000ms
+             * Source -1---------2---------3-4-5-----------6-7-8---------9---------10------
+             * Result -1---------2---------3-4-------------------------------------10------
+             *
+             * Essentially, 6-7-8 triggers a suspension (as per the one-pass analysis of the source
+             * sequence) and that swallows up 9.
+             ******************************************************************************/
+
+            // arrange
+            var scheduler = new TestScheduler();
+            scheduler.AdvanceBy(TimeSpan.FromDays(1).Ticks);
+
+            var observer = scheduler.CreateObserver<int>();
+
+            var source = new Subject<int>();
+
+            source.SuspendDuringFlood(3, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(15), scheduler)
+                  .Subscribe(observer);
+
+            // act
+            /******************************************************************************
+             *
+             * source -1---------2---------3-4-5-----------6-7-8---------9---------10------
+             *
+             ******************************************************************************/
+
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(2).Ticks);  // 2
+            source.OnNext(1);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(10).Ticks); // 12
+            source.OnNext(2);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(11).Ticks); // 23
+            source.OnNext(3);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(2).Ticks);  // 25
+            source.OnNext(4);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(2).Ticks);  // 27 - Start suspension until 41
+            source.OnNext(5);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(12).Ticks); // 39 - Suspend
+            source.OnNext(6);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(2).Ticks);  // 41 - Suspend
+            source.OnNext(7);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(2).Ticks);  // 43 - Start new suspension until 58
+            source.OnNext(8);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(10).Ticks); // 53 - Suspend (within the new re-suspend period)
+            source.OnNext(9);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(10).Ticks); // 63
+            source.OnNext(10);
+            scheduler.AdvanceBy(1);
+            source.OnCompleted();
+
+            // verify
+            var results = observer.
+                Messages
+                .Where(m => m.Value.Kind == NotificationKind.OnNext)
+                .Select(m => m.Value.Value).ToArray();
+
+            Assert.AreEqual(1, results[0]);
+            Assert.AreEqual(2, results[1]);
+            Assert.AreEqual(3, results[2]);
+            Assert.AreEqual(4, results[3]);
+            Assert.AreEqual(10, results[4]);
+        }
+
+        [Test]
+        public void SuspendDuringFlood_EmphasizeTheNeedForResetOfPerspectiveAfterSuspensionIsOver()
+        {
+            /******************************************************************************
+             * Max = 3, Window = 5000ms, Suspend = 15000ms
+             * Source -1---------2---------3-4-5-----------6-7-8---------9---------10------
+             * Result -1---------2---------3-4-----------------8---------8---------10------
+             *
+             * As opposed to the solution above, 6 & 7 are now considered as having been swallowed/ignored
+             * due to the 3-4-5 triggered suspension. 8 is now the first element after a suspension end.
+             * Since the Suspend interval is higher than the Window interval, 8 cannot be in a buffer with
+             * some 2 (i.e, Max - 1) preceeding values. It acts like the Max - 1 elements of the source
+             * sequence's beginning. So do all of the Max - 1 values following a suspension end.
+             ******************************************************************************/
+
+            // arrange
+            var scheduler = new TestScheduler();
+            scheduler.AdvanceBy(TimeSpan.FromDays(1).Ticks);
+
+            var observer = scheduler.CreateObserver<int>();
+
+            var source = new Subject<int>();
+
+            source.SuspendDuringFloodWithRectification(3, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(15), scheduler)
+                  .Subscribe(observer);
+
+            // act
+            /******************************************************************************
+             *
+             * source -1---------2---------3-4-5-----------6-7-8---------9---------10------
+             *
+             ******************************************************************************/
+
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(2).Ticks);  // 2
+            source.OnNext(1);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(10).Ticks); // 12
+            source.OnNext(2);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(11).Ticks); // 23
+            source.OnNext(3);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(2).Ticks);  // 25
+            source.OnNext(4);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(2).Ticks);  // 27 - Start suspension until 41
+            source.OnNext(5);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(12).Ticks); // 39 - Suspend
+            source.OnNext(6);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(2).Ticks);  // 41 - Suspend
+            source.OnNext(7);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(2).Ticks);  // 43 - Disconsider this as being part of the 6-7-8 buffer since 6 & 7 are ignored
+            source.OnNext(8);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(10).Ticks); // 53
+            source.OnNext(9);
+            scheduler.AdvanceBy(TimeSpan.FromSeconds(10).Ticks); // 63
+            source.OnNext(10);
+            scheduler.AdvanceBy(1);
+            source.OnCompleted();
+
+            // verify
+            var results = observer.
+                Messages
+                .Where(m => m.Value.Kind == NotificationKind.OnNext)
+                .Select(m => m.Value.Value).ToArray();
+
+            Assert.AreEqual(1, results[0]);
+            Assert.AreEqual(2, results[1]);
+            Assert.AreEqual(3, results[2]);
+            Assert.AreEqual(4, results[3]);
+            Assert.AreEqual(8, results[4]);
+            Assert.AreEqual(9, results[5]);
+            Assert.AreEqual(10, results[6]);
         }
     }
 }
