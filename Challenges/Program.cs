@@ -21,7 +21,7 @@ namespace Challenges
     public class RxChallengesTests
     {
         [Test]
-        public void Buffer_ShouldBulkOn_CountTimeoutOrFlush_NaiveSolution()
+        public void Buffer_ShouldProduceOn_CountOrTimeoutOrFlush_ByImplementingNaiveBuffer()
         {
             // produce a buffer that should produce its bulk
             // as result of one of the following trigger
@@ -69,7 +69,7 @@ namespace Challenges
         }
 
         [Test]
-        public void Buffer_ShouldBulkOn_CountTimeoutOrFlush_ProvidedSolution()
+        public void Buffer_ShouldProduceOn_CountAndTimeoutAndFlush_ByUsingBuffer()
         {
             // produce a buffer that should produce its bulk
             // as result of one of the following trigger
@@ -121,6 +121,160 @@ namespace Challenges
             ReactiveAssert.AreElementsEqual(new[] { 6, 7, 8, 9 }, results[1]);
             ReactiveAssert.AreElementsEqual(new[] { 10, 11 }, results[2]);
             ReactiveAssert.AreElementsEqual(new[] { 12, 13, 14 }, results[3]);
+        }
+
+        [Test]
+        public void Buffer_ShouldProduceOn_CountAndTimeoutAndFlush_ByReimplementingBufferWithWindowAndAggregate()
+        {
+            //Arrange
+            var timeThreshold = TimeSpan.FromMilliseconds(500);
+            var countThreshold = 6;
+
+            var testScheduler = new TestScheduler();
+            var testObserver = testScheduler.CreateObserver<IList<int>>();
+
+            var source = testScheduler.CreateHotObservable( //Either Hot or Cold + Publish + RefCount, due to it being shared with the "count" observable
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(1).Ticks, Notification.CreateOnNext(0)),
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(1).Ticks + 1, Notification.CreateOnNext(1)),
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(1).Ticks + 2, Notification.CreateOnNext(2)),
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(1).Ticks + 3, Notification.CreateOnNext(3)),
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(1).Ticks + 4, Notification.CreateOnNext(4)),
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(1).Ticks + 5, Notification.CreateOnNext(5)),
+                // Spew above due to count
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(1).Ticks + 6, Notification.CreateOnNext(6)),
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(1).Ticks + 7, Notification.CreateOnNext(7)),
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(1).Ticks + 8, Notification.CreateOnNext(8)),
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(1).Ticks + 9, Notification.CreateOnNext(9)),
+                // Spew above due to timout
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(510).Ticks, Notification.CreateOnNext(10)),
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(510).Ticks + 1, Notification.CreateOnNext(11)),
+                // Spew above due to flush
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(515).Ticks, Notification.CreateOnNext(12)),
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(515).Ticks + 1, Notification.CreateOnNext(13)),
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(515).Ticks + 2, Notification.CreateOnNext(14)),
+                // Spew above due to timeout
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(1200).Ticks, Notification.CreateOnCompleted<int>())
+            );
+
+            var timer = Observable.Interval(timeThreshold, testScheduler).TakeUntil(source.TakeLast(1).Do(_ => Console.WriteLine("Blipped Last"))).Select(_ => Unit.Default).Do(_ => Console.WriteLine("Blipped from Timer"));
+            var count = source.Buffer(countThreshold).Select(_ => Unit.Default).Do(_ => Console.WriteLine("Blipped from Buffer"));
+            var flush = testScheduler.CreateHotObservable(
+                new Recorded<Notification<Unit>>(TimeSpan.FromMilliseconds(513).Ticks, Notification.CreateOnNext(Unit.Default)),
+                new Recorded<Notification<Unit>>(TimeSpan.FromMilliseconds(1200).Ticks, Notification.CreateOnCompleted<Unit>())
+            ).Do(_ => Console.WriteLine("Blipped from Flush"));
+
+            var merged = Observable.Merge(timer, count, flush);
+
+            //Act
+            BufferNonEmptyThroughWindow(source, merged).Subscribe(testObserver);
+
+            //Assert
+            testScheduler.Start();
+            var results = testObserver.Messages
+                .Where(m => m.Value.Kind == NotificationKind.OnNext)
+                .Select(m => m.Value.Value).ToArray();
+
+            Assert.AreEqual(4, results.Length);
+            ReactiveAssert.AreElementsEqual(new[] { 0, 1, 2, 3, 4, 5 }, results[0]);
+            ReactiveAssert.AreElementsEqual(new[] { 6, 7, 8, 9 }, results[1]);
+            ReactiveAssert.AreElementsEqual(new[] { 10, 11 }, results[2]);
+            ReactiveAssert.AreElementsEqual(new[] { 12, 13, 14 }, results[3]);
+        }
+
+        private static IObservable<List<int>> BufferNonEmptyThroughWindow(IObservable<int> source, IObservable<Unit> merged)
+        {
+            var buffers = source.Window(() => merged)
+                .SelectMany(
+                    window =>
+                    {
+                        return window.Aggregate(
+                            new List<int>(),
+                            (acc, curr) =>
+                            {
+                                acc.Add(curr);
+
+                                return acc;
+                            });
+                    })
+                .Where(b => b.Any()); //The "non-empty" part
+
+            return buffers;
+        }
+
+        [Test]
+        public void Buffer_ShouldProduceOn_CountOrTimeoutOrFlush_ByUsingAmbAndDefferedRecursion()
+        {
+            //Arrange
+            var timeThreshold = TimeSpan.FromMilliseconds(20);
+            var countThreshold = 3;
+
+            var testScheduler = new TestScheduler();
+            var testObserver = testScheduler.CreateObserver<IList<int>>();
+
+            var source = testScheduler.CreateHotObservable(
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(1).Ticks, Notification.CreateOnNext(0)),
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(2).Ticks, Notification.CreateOnNext(1)),
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(3).Ticks, Notification.CreateOnNext(2)),
+                // Spew above due to count
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(4).Ticks, Notification.CreateOnNext(3)),
+                // Spew above due to timeout
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(25).Ticks, Notification.CreateOnNext(4)),
+                // Spew above due to flush
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(33).Ticks, Notification.CreateOnNext(5)),
+                //Spew above due to timeout
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(54).Ticks, Notification.CreateOnNext(6)),
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(64).Ticks, Notification.CreateOnNext(7)),
+                //Spew above due to timeout
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(75).Ticks, Notification.CreateOnNext(8)),
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(76).Ticks, Notification.CreateOnNext(9)),
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(77).Ticks, Notification.CreateOnNext(10)),
+                // Spew above due to count
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(96).Ticks, Notification.CreateOnNext(11)),
+                // Spew above due to flush
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(98).Ticks, Notification.CreateOnNext(12)),
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(99).Ticks, Notification.CreateOnNext(13)),
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(100).Ticks, Notification.CreateOnNext(14)),
+                // Spew above due to count
+                new Recorded<Notification<int>>(TimeSpan.FromMilliseconds(101).Ticks, Notification.CreateOnCompleted<int>())
+            );
+
+            var manualFlush = testScheduler.CreateHotObservable(
+                new Recorded<Notification<Unit>>(TimeSpan.FromMilliseconds(27).Ticks, Notification.CreateOnNext(Unit.Default)),
+                new Recorded<Notification<Unit>>(TimeSpan.FromMilliseconds(97).Ticks, Notification.CreateOnNext(Unit.Default)),
+                new Recorded<Notification<Unit>>(TimeSpan.FromMilliseconds(101).Ticks, Notification.CreateOnCompleted<Unit>())
+            );
+
+            var timeOrCountOrFlush = GetTimeOrCount(source, testScheduler, timeThreshold, countThreshold, manualFlush);
+
+            //Act
+            source.Buffer(timeOrCountOrFlush).Where(b => b.Any()).Subscribe(testObserver);
+
+            //Assert
+            testScheduler.Start();
+            var results = testObserver.Messages
+                .Where(m => m.Value.Kind == NotificationKind.OnNext)
+                .Select(m => m.Value.Value).ToArray();
+
+            Assert.AreEqual(8, results.Length);
+            ReactiveAssert.AreElementsEqual(new[] { 0, 1, 2 }, results[0]);
+            ReactiveAssert.AreElementsEqual(new[] { 3 }, results[1]);
+            ReactiveAssert.AreElementsEqual(new[] { 4 }, results[2]);
+            ReactiveAssert.AreElementsEqual(new[] { 5 }, results[3]);
+            ReactiveAssert.AreElementsEqual(new[] { 6, 7 }, results[4]);
+            ReactiveAssert.AreElementsEqual(new[] { 8, 9, 10 }, results[5]);
+            ReactiveAssert.AreElementsEqual(new[] { 11 }, results[6]);
+            ReactiveAssert.AreElementsEqual(new[] { 12, 13, 14 }, results[7]);
+        }
+
+        private static IObservable<Unit> GetTimeOrCount(
+            IObservable<int> source, TestScheduler testScheduler,
+            TimeSpan timeThreshold, int countThreshold, IObservable<Unit> manualFlush)
+        {
+            return Observable.Amb(
+                    Observable.Timer(timeThreshold, testScheduler).Select(_ => Unit.Default).Do(_ => Console.WriteLine("Blipped from Timer")),
+                    source.Buffer(countThreshold).Take(1).Select(_ => Unit.Default).Do(_ => Console.WriteLine("Blipped from Buffer")),
+                    manualFlush.Take(1).Do(_ => Console.WriteLine("Blipped from Flush")))
+                .Concat(Observable.Defer(() => GetTimeOrCount(source, testScheduler, timeThreshold, countThreshold, manualFlush)));
         }
 
         [Test]
